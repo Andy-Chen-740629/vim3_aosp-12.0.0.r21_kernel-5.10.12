@@ -845,9 +845,6 @@ struct fuse_conn {
 
 	/** Protects passthrough_req */
 	spinlock_t passthrough_req_lock;
-
-	/** task_struct for fd lookups in fuse-bpf */
-	struct task_struct *task;
 };
 
 /*
@@ -953,7 +950,6 @@ struct inode *fuse_iget(struct super_block *sb, u64 nodeid,
 
 int fuse_lookup_name(struct super_block *sb, u64 nodeid, const struct qstr *name,
 		     struct fuse_entry_out *outarg,
-		     struct fuse_entry_bpf_out *bpf_outarg,
 		     struct dentry *entry, struct inode **inode);
 
 /**
@@ -1310,8 +1306,7 @@ ssize_t fuse_passthrough_mmap(struct file *file, struct vm_area_struct *vma);
 
 /* backing.c */
 
-struct file *fuse_fget(struct fuse_conn *fc, unsigned int fd);
-struct bpf_prog *fuse_get_bpf_prog(struct fuse_conn *fc, unsigned int fd);
+struct bpf_prog *fuse_get_bpf_prog(struct file *file);
 
 /*
  * Dummy io passed to fuse_bpf_backing when io operation needs no scratch space
@@ -1438,6 +1433,35 @@ int fuse_flush_backing(struct fuse_args *fa, struct file *file, fl_owner_t id);
 void *fuse_flush_finalize(struct fuse_args *fa,
 			  struct file *file, fl_owner_t id);
 
+struct fuse_lseek_io {
+	struct fuse_lseek_in fli;
+	struct fuse_lseek_out flo;
+};
+
+int fuse_lseek_initialize(struct fuse_args *fa, struct fuse_lseek_io *fli,
+			  struct file *file, loff_t offset, int whence);
+int fuse_lseek_backing(struct fuse_args *fa, struct file *file, loff_t offset, int whence);
+void *fuse_lseek_finalize(struct fuse_args *fa, struct file *file, loff_t offset, int whence);
+
+struct fuse_copy_file_range_io {
+	struct fuse_copy_file_range_in fci;
+	struct fuse_write_out fwo;
+};
+
+int fuse_copy_file_range_initialize(struct fuse_args *fa,
+				   struct fuse_copy_file_range_io *fcf,
+				   struct file *file_in, loff_t pos_in,
+				   struct file *file_out, loff_t pos_out,
+				   size_t len, unsigned int flags);
+int fuse_copy_file_range_backing(struct fuse_args *fa,
+				 struct file *file_in, loff_t pos_in,
+				 struct file *file_out, loff_t pos_out,
+				 size_t len, unsigned int flags);
+void *fuse_copy_file_range_finalize(struct fuse_args *fa,
+				    struct file *file_in, loff_t pos_in,
+				    struct file *file_out, loff_t pos_out,
+				    size_t len, unsigned int flags);
+
 int fuse_fsync_initialize(struct fuse_args *fa, struct fuse_fsync_in *ffi,
 		   struct file *file, loff_t start, loff_t end, int datasync);
 int fuse_fsync_backing(struct fuse_args *fa,
@@ -1500,9 +1524,13 @@ int fuse_file_read_iter_backing(struct fuse_args *fa,
 void *fuse_file_read_iter_finalize(struct fuse_args *fa,
 		struct kiocb *iocb, struct iov_iter *to);
 
+struct fuse_write_iter_out {
+	uint64_t ret;
+};
 struct fuse_file_write_iter_io {
 	struct fuse_write_in fwi;
 	struct fuse_write_out fwo;
+	struct fuse_write_iter_out fwio;
 };
 
 int fuse_file_write_iter_initialize(
@@ -1525,7 +1553,7 @@ void *fuse_file_fallocate_finalize(struct fuse_args *fa,
 
 struct fuse_lookup_io {
 	struct fuse_entry_out feo;
-	struct fuse_entry_bpf_out febo;
+	struct fuse_entry_bpf feb;
 };
 
 int fuse_lookup_initialize(struct fuse_args *fa, struct fuse_lookup_io *feo,
@@ -1850,12 +1878,12 @@ struct fuse_err_ret {
 			ERR_PTR(backing(&fa, args)),			\
 			true,						\
 		};							\
+		if (IS_ERR(fer.result))					\
+			fa.error_in = PTR_ERR(fer.result);		\
 		if (!(ext_flags & FUSE_BPF_POST_FILTER))		\
 			break;						\
 									\
 		fa.opcode |= FUSE_POSTFILTER;				\
-		if (IS_ERR(fer.result))					\
-			fa.error_in = PTR_ERR(fer.result);		\
 		for (i = 0; i < fa.out_numargs; ++i)			\
 			fa.in_args[fa.in_numargs++] =			\
 				(struct fuse_in_arg) {			\
