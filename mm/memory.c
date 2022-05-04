@@ -3600,7 +3600,7 @@ vm_fault_t do_swap_page(struct vm_fault *vmf)
 		if (data_race(si->flags & SWP_SYNCHRONOUS_IO) &&
 		    __swap_count(entry) == 1) {
 			/* skip swapcache */
-			gfp_t flags = GFP_HIGHUSER_MOVABLE;
+			gfp_t flags = GFP_HIGHUSER_MOVABLE | __GFP_CMA;
 
 			trace_android_rvh_set_skip_swapcache_flags(&flags);
 			page = alloc_page_vma(flags, vma, vmf->address);
@@ -3640,7 +3640,7 @@ vm_fault_t do_swap_page(struct vm_fault *vmf)
 			ret = VM_FAULT_RETRY;
 			goto out;
 		} else {
-			page = swapin_readahead(entry, GFP_HIGHUSER_MOVABLE,
+			page = swapin_readahead(entry, GFP_HIGHUSER_MOVABLE | __GFP_CMA,
 						vmf);
 			swapcache = page;
 		}
@@ -4892,6 +4892,10 @@ static inline void mm_account_fault(struct pt_regs *regs,
 	else
 		perf_sw_event(PERF_COUNT_SW_PAGE_FAULTS_MIN, 1, regs, address);
 }
+
+static void lru_gen_enter_fault(struct vm_area_struct *vma);
+static void lru_gen_exit_fault(void);
+
 #ifdef CONFIG_SPECULATIVE_PAGE_FAULT
 
 #ifndef CONFIG_ARCH_HAS_PTE_SPECIAL
@@ -5083,7 +5087,9 @@ static vm_fault_t ___handle_speculative_fault(struct mm_struct *mm,
 	}
 
 	mem_cgroup_enter_user_fault();
+	lru_gen_enter_fault(vmf.vma);
 	ret = handle_pte_fault(&vmf);
+	lru_gen_exit_fault();
 	mem_cgroup_exit_user_fault();
 
 	if (ret != VM_FAULT_RETRY) {
