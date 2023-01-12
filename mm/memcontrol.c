@@ -4868,6 +4868,7 @@ static ssize_t memcg_write_event_control(struct kernfs_open_file *of,
 	unsigned int efd, cfd;
 	struct fd efile;
 	struct fd cfile;
+	struct dentry *cdentry;
 	const char *name;
 	char *endp;
 	int ret;
@@ -4919,6 +4920,16 @@ static ssize_t memcg_write_event_control(struct kernfs_open_file *of,
 		goto out_put_cfile;
 
 	/*
+	 * The control file must be a regular cgroup1 file. As a regular cgroup
+	 * file can't be renamed, it's safe to access its name afterwards.
+	 */
+	cdentry = cfile.file->f_path.dentry;
+	if (cdentry->d_sb->s_type != &cgroup_fs_type || !d_is_reg(cdentry)) {
+		ret = -EINVAL;
+		goto out_put_cfile;
+	}
+
+	/*
 	 * Determine the event callbacks and set them in @event.  This used
 	 * to be done via struct cftype but cgroup core no longer knows
 	 * about these events.  The following is crude but the whole thing
@@ -4926,7 +4937,7 @@ static ssize_t memcg_write_event_control(struct kernfs_open_file *of,
 	 *
 	 * DO NOT ADD NEW FILES.
 	 */
-	name = cfile.file->f_path.dentry->d_name.name;
+	name = cdentry->d_name.name;
 
 	if (!strcmp(name, "memory.usage_in_bytes")) {
 		event->register_event = mem_cgroup_usage_register_event;
@@ -4950,7 +4961,7 @@ static ssize_t memcg_write_event_control(struct kernfs_open_file *of,
 	 * automatically removed on cgroup destruction but the removal is
 	 * asynchronous, so take an extra ref on @css.
 	 */
-	cfile_css = css_tryget_online_from_dir(cfile.file->f_path.dentry->d_parent,
+	cfile_css = css_tryget_online_from_dir(cdentry->d_parent,
 					       &memory_cgrp_subsys);
 	ret = -EINVAL;
 	if (IS_ERR(cfile_css))
@@ -5330,8 +5341,8 @@ static struct mem_cgroup *mem_cgroup_alloc(void)
 	memcg->deferred_split_queue.split_queue_len = 0;
 #endif
 	idr_replace(&mem_cgroup_idr, memcg, memcg->id.id);
-	trace_android_vh_mem_cgroup_alloc(memcg);
 	lru_gen_init_memcg(memcg);
+	trace_android_vh_mem_cgroup_alloc(memcg);
 	return memcg;
 fail:
 	mem_cgroup_id_remove(memcg);
@@ -6229,9 +6240,10 @@ static void mem_cgroup_move_task(void)
 #ifdef CONFIG_LRU_GEN
 static void mem_cgroup_attach(struct cgroup_taskset *tset)
 {
+	struct task_struct *task;
 	struct cgroup_subsys_state *css;
-	struct task_struct *task = NULL;
 
+	/* find the first leader if there is any */
 	cgroup_taskset_for_each_leader(task, css, tset)
 		break;
 
@@ -6239,7 +6251,7 @@ static void mem_cgroup_attach(struct cgroup_taskset *tset)
 		return;
 
 	task_lock(task);
-	if (task->mm && task->mm->owner == task)
+	if (task->mm && READ_ONCE(task->mm->owner) == task)
 		lru_gen_migrate_mm(task->mm);
 	task_unlock(task);
 }
